@@ -1,122 +1,213 @@
 """ Proxy for parrot devices.
 """
 import json
+import re
 import socket
+import telnetlib
 import time
 import threading
 import zeroconf
 import SocketServer
 
 
+### CONFIGURATION
+#
+# The PROXY_IP is the IP of your interface that is *not* connected to your
+# Jumping Sumo.
 PROXY_IP = '192.168.20.3'
-BOT_IP = '192.168.2.1'
-BOT_INIT_PORT = 44444
-SERVICE_NAME = '_arsdk-0902._udp.local.'
+
+
 RECV_MAX = 10240
 
-BOT_C2DPORT = None
-BOT_D2CPORT = None
-CONTROLLER_D2CPORT = None
-CONTROLLER_IP = None
+
+def get_first_sumo():
+    """ Return the zeroconf name for the first Jumping Sumo you can find.
+
+        This is a painful three-step process because the "service type"
+        changes with updates to the firmware.
+    """
+    # First we need to detect the tcp:9 interface via zeroconf, this gives us
+    # the IP of the bot.
+    zc = zeroconf.Zeroconf()
+    ip_list = []
+    class TcpListener(object):
+
+        def remove_service(self, zc, type, name):
+            pass
+
+        def add_service(self, zc, type_, name):
+            info = zc.get_service_info(type_, name)
+            if info.name.startswith('JumpingSumo-'):
+                ip_list.append(socket.inet_ntoa(info.address))
+
+    tcp_browser = zeroconf.ServiceBrowser(
+        zc, '_ssh._tcp.local.', TcpListener()
+    )
+    while len(ip_list) == 0:
+        time.sleep(0.1)
+    tcp_browser.cancel()
+
+    ip = ip_list[0]
+
+    # Now we have the IP, we can connect via telnet and get the init port
+    # zeroconf type.
+    tconn = telnetlib.Telnet(ip, timeout=1)
+    tconn.read_until('[JS] $ ')
+    tconn.write('cat /etc/avahi/services/ardiscovery.service\r\n')
+    data = tconn.read_until('[JS] $ ').replace('\r\n', '')
+
+    service_type = re.search(r'>(_arsdk-\d+\._udp)<', data).groups()[0]
+    init_port = int(re.search(r'<port>(\d+)</port>', data).groups()[0])
+
+    return service_type + '.local.', ip, init_port
 
 
-def announce_zeroconf(ip, service_type, service_name='JumpingSumo-SumoProxy'):
+def announce_proxy_sumo(service_type, ip, init_port, service_name='JumpingSumo-SumoProxy'):
     """ Announce the proxied Jumping Sumo.
     """
-    zconf = zeroconf.Zeroconf()
+    zc = zeroconf.Zeroconf()
 
     info = zeroconf.ServiceInfo(
         service_type,
         '.'.join((service_name, service_type)),
         socket.inet_aton(ip),
-        BOT_INIT_PORT,
+        init_port,
         properties={},
     )
 
-    zconf.register_service(info)
+    zc.register_service(info)
 
 
-class InitHandler(SocketServer.BaseRequestHandler):
-    """ SocketServer handler for init handshake.
+def proxy_init(sumo_ip, init_port):
+    """ Proxy the init.
     """
-    def handle(self):
-        global BOT_C2DPORT
-        global CONTROLLER_D2CPORT
-        global BOT_D2CPORT
-        global CONTROLLER_IP
+    init_server = None
+    return_data = []
 
-        data = self.request.recv(RECV_MAX)
-        print '>', repr(data)
+    class InitHandler(SocketServer.BaseRequestHandler):
+        """ SocketServer handler for init handshake.
+        """
+        def handle(self):
 
-        json_data = json.loads(data[:-1])
+            client_ip = self.client_address[0]
 
-        CONTROLLER_D2CPORT = json_data['d2c_port']
-        BOT_D2CPORT = CONTROLLER_D2CPORT + 1
-        CONTROLLER_IP = self.client_address[0]
+            # Get and pass on the init request, capturing the d2c_port
+            data = self.request.recv(RECV_MAX)
+            d2c_port = json.loads(data[:-1])['d2c_port']
+            sumo_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sumo_sock.connect((sumo_ip, init_port))
+            sumo_sock.sendall(data)
 
-        # Reconstruct the data with the new D2C Port
-        json_data['d2c_port'] = BOT_D2CPORT
-        data = json.dumps(json_data) + '\x00'
+            # Get and pass on the init response, capturing the c2d_port
+            data = sumo_sock.recv(RECV_MAX)
+            sumo_sock.close()
 
-        bot_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        bot_socket.connect((BOT_IP, BOT_INIT_PORT))
-        bot_socket.sendall(data)
-        data = bot_socket.recv(RECV_MAX)
-        print '<', repr(data)
+            c2d_port = json.loads(data[:-1])['c2d_port']
+            self.request.sendall(data)
 
-        BOT_C2DPORT = json.loads(data[:-1])['c2d_port']
+            return_data.extend((client_ip, c2d_port, d2c_port))
 
-        self.request.sendall(data)
-        bot_socket.close()
+            def tidy():
+                """ Clean up the server.
+                """
+                init_server.shutdown()
+                init_server.server_close()
+            threading.Thread(target=tidy).start()
+
+    init_server = SocketServer.TCPServer(('', init_port), InitHandler)
+    server_thread = threading.Thread(target=init_server.serve_forever)
+    server_thread.start()
+    server_thread.join()
+
+    return return_data
 
 
-class C2D_UDPHandler(SocketServer.BaseRequestHandler):
-    """ SocketServer handler for data to bot from controller.
+def proxy_session(client_ip, sumo_ip, c2d_port, d2c_port):
+    """ Proxy a UDP session between client and sumo.
     """
-    def handle(self):
-        data = self.request[0]
-        print '>', repr(data)
+    # If the c2d and d2c ports are the same, we start a single server.
+    if c2d_port == d2c_port:
 
-        bot_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        bot_socket.sendto(data, (BOT_IP, BOT_C2DPORT))
+        send_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+        class Handler(SocketServer.BaseRequestHandler):
+            """ Handle all comms.
+            """
+            def handle(self):
+                data = self.request[0]
+
+                # From client to sumo
+                if self.client_address[0] == client_ip:
+                    print '>', repr(data)
+                    send_socket.sendto(data, (sumo_ip, c2d_port))
+                # From sumo to client
+                else:
+                    print '<', repr(data)
+                    send_socket.sendto(data, (client_ip, c2d_port))
+
+        server = SocketServer.UDPServer(('', c2d_port), Handler)
+        threading.Thread(target=server.serve_forever).start()
+
+    else:
+
+        send_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+        class C2DHandler(SocketServer.BaseRequestHandler):
+            """ Handle client to sumo comms.
+            """
+            def handle(self):
+                data = self.request[0]
+                #print '>', repr(data)
+                send_socket.sendto(data, (sumo_ip, c2d_port))
+
+        class D2CHandler(SocketServer.BaseRequestHandler):
+            """ Handle sumo to client comms.
+            """
+            def handle(self):
+                data = self.request[0]
+                #print '<', repr(data)
+                send_socket.sendto(data, (client_ip, d2c_port))
+
+        c2d_server = SocketServer.UDPServer(('', c2d_port), C2DHandler)
+        d2c_server = SocketServer.UDPServer(('', d2c_port), D2CHandler)
+        threading.Thread(target=c2d_server.serve_forever).start()
+        threading.Thread(target=d2c_server.serve_forever).start()
 
 
-class D2C_UDPHandler(SocketServer.BaseRequestHandler):
-    """ SocketServer handler for data to controller from bot.
+def main():
+    """ Handle all the things.
     """
-    def handle(self):
-        data = self.request[0]
-        print '<', repr(data)
+    # Find the robot
+    print 'Searching for Jumping Sumo...',
+    service_type, sumo_ip, init_port = get_first_sumo()
+    print 'Done!'
 
-        controller_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        controller_socket.sendto(data, (CONTROLLER_IP, CONTROLLER_D2CPORT))
+    # Announce equivalent sumo
+    print 'Announcing Sumo Proxy...',
+    announce_proxy_sumo(
+        service_type,
+        PROXY_IP,
+        init_port,
+    )
+    print 'Done!'
+
+    print 'Waiting for client initiation...',
+    client_ip, c2d_port, d2c_port = proxy_init(sumo_ip, init_port)
+    print 'Done!'
+
+    print 'Serving session...',
+    proxy_session(client_ip, sumo_ip, c2d_port, d2c_port)
+    print 'Done!'
+
+    if c2d_port == 0:
+        print 'Another client already connected!'
+        import sys; sys.exit(1)
+    else:
+        print 'Press Ctrl-C to quit...'
+        while True:
+            time.sleep(0.1)
 
 
 if __name__ == '__main__':
 
-    # Announce proxy via Bonjour
-    announce_zeroconf(
-        PROXY_IP,
-        SERVICE_NAME,
-    )
-
-    # Create init-handshake server and wait on connection
-    init_server = SocketServer.TCPServer(('', BOT_INIT_PORT), InitHandler)
-    threading.Thread(target=init_server.serve_forever).start()
-
-    # Wait on getting a port info
-    print 'Waiting for INIT...'
-    while CONTROLLER_IP is None or BOT_C2DPORT is None or BOT_D2CPORT is None or CONTROLLER_D2CPORT is None:
-        time.sleep(0.01)
-
-    # Handle data from controller to the bot
-    print 'Listening for C2D data on {}'.format(BOT_C2DPORT)
-    c2d_udp_server = SocketServer.UDPServer(('', BOT_C2DPORT), C2D_UDPHandler)
-    threading.Thread(target=c2d_udp_server.serve_forever).start()
-
-    # Handle data back from the bot to the controller
-    print 'Listening for D2C data on {}'.format(BOT_D2CPORT)
-    d2c_udp_server = SocketServer.UDPServer(('', BOT_D2CPORT), D2C_UDPHandler)
-    d2c_udp_server.serve_forever()
-
-    raw_input('Press Enter to stop...')
+    main()
