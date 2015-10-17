@@ -132,10 +132,10 @@ class SumoProxy(object):
     def proxy_session(self, client_ip, sumo_ip, c2d_port, d2c_port):
         """ Proxy a UDP session between client and sumo.
         """
+        send_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
         # If the c2d and d2c ports are the same, we start a single server.
         if c2d_port == d2c_port:
-
-            send_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
             class Handler(SocketServer.BaseRequestHandler):
                 """ Handle all comms.
@@ -156,8 +156,6 @@ class SumoProxy(object):
             threading.Thread(target=server.serve_forever).start()
 
         else:
-
-            send_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
             class C2DHandler(SocketServer.BaseRequestHandler):
                 """ Handle client to sumo comms.
