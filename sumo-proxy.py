@@ -16,6 +16,12 @@ import SocketServer
 PROXY_IP = '192.168.20.3'
 
 
+def repr_bytes(bytes, maximum=25):
+    """ Nicer data printing.
+    """
+    return ''.join('\\x{:02x}'.format(ord(c)) for c in bytes[:maximum])
+
+
 class SumoProxy(object):
     """ Proxy for Jumping Sumo to display data.
     """
@@ -149,11 +155,11 @@ class SumoProxy(object):
 
                     # From client to sumo
                     if self.client_address[0] == client_ip:
-                        print '>', repr(data)
+                        print '>', repr_bytes(data)
                         send_socket.sendto(data, (sumo_ip, c2d_port))
                     # From sumo to client
                     else:
-                        print '<', repr(data[:50])
+                        print '<', repr_bytes(data)
                         send_socket.sendto(data, (client_ip, c2d_port))
 
             server = SocketServer.UDPServer(('', c2d_port), Handler)
@@ -166,7 +172,7 @@ class SumoProxy(object):
                 """
                 def handle(self):
                     data = self.request[0]
-                    print '>', repr(data)
+                    print '>', repr_bytes(data)
                     send_socket.sendto(data, (sumo_ip, c2d_port))
 
             class D2CHandler(SocketServer.BaseRequestHandler):
@@ -174,7 +180,7 @@ class SumoProxy(object):
                 """
                 def handle(self):
                     data = self.request[0]
-                    print '<', repr(data[:50])
+                    print '<', repr_bytes(data)
                     send_socket.sendto(data, (client_ip, d2c_port))
 
             c2d_server = SocketServer.UDPServer(('', c2d_port), C2DHandler)
