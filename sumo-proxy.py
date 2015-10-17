@@ -23,6 +23,7 @@ class SumoProxy(object):
 
     def __init__(self, proxy_ip):
         self._proxy_ip = proxy_ip
+        self._zc = zeroconf.Zeroconf()
 
     def get_first_sumo(self):
         """ Return the zeroconf name for the first Jumping Sumo you can find.
@@ -32,7 +33,6 @@ class SumoProxy(object):
         """
         # First we need to detect the ssh interface via zeroconf, this gives us
         # the IP of the bot.
-        zc = zeroconf.Zeroconf()
         ip_list = []
         class SshListener(object):
             """ A simple listener for the .
@@ -50,7 +50,7 @@ class SumoProxy(object):
                     ip_list.append(socket.inet_ntoa(info.address))
 
         ssh_browser = zeroconf.ServiceBrowser(
-            zc, '_ssh._tcp.local.', SshListener()
+            self._zc, '_ssh._tcp.local.', SshListener()
         )
         while len(ip_list) == 0:
             time.sleep(0.1)
@@ -74,8 +74,6 @@ class SumoProxy(object):
     def announce_proxy_sumo(self, service_type, ip, init_port, service_name='JumpingSumo-SumoProxy'):
         """ Announce the proxied Jumping Sumo.
         """
-        zc = zeroconf.Zeroconf()
-
         info = zeroconf.ServiceInfo(
             service_type,
             '.'.join((service_name, service_type)),
@@ -84,7 +82,7 @@ class SumoProxy(object):
             properties={},
         )
 
-        zc.register_service(info)
+        self._zc.register_service(info)
 
 
     def proxy_init(self, sumo_ip, init_port):
