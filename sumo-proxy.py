@@ -1,9 +1,7 @@
 """ Proxy for parrot devices.
 """
 import json
-import re
 import socket
-import telnetlib
 import time
 import threading
 import zeroconf
