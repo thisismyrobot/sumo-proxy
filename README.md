@@ -10,4 +10,4 @@ Designed for a two-interface PC - one interface connects to the Sumo and the
 other connects to an existing Access Point. The controller (e.g. iPad)
 connects to the Access Point and is able to see the Sumo via this proxy.
 
-Started life in the [sumo charge](https://github.com/thisismyrobot/sumo-charge) repo without history.
+Started life in the [sumo charge](https://github.com/thisismyrobot/sumo-charge) repository.
