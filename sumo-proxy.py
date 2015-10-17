@@ -35,53 +35,38 @@ class SumoProxy(object):
         SocketServer.UDPServer.max_packet_size = 65000
 
 
-    def get_first_sumo(self):
-        """ Return the zeroconf name for the first Jumping Sumo you can find.
-
-            This is a painful three-step process because the "service type"
-            changes with updates to the firmware.
+    def get_first_sumo(self, service_type='_arsdk-0902._udp.local.'):
+        """ Return the IP and INIT port for the first Jumping Sumo you find.
         """
-        # First we need to detect the ssh interface via zeroconf, this gives us
-        # the IP of the bot.
-        ip_list = []
-        class SshListener(object):
-            """ A simple listener for the .
+        connection_info = []
+        class Listener(object):
+            """ A simple listener for the sumo init service.
             """
-            def remove_service(self, zc, type, name):
+            def remove_service(self, zc, type_, name):
                 """ We're not concerned with the remove_service event.
                 """
                 pass
 
             def add_service(self, zc, type_, name):
-                """ If we've found the JumpingSumo service, add it to the list.
+                """ If we've found the JumpingSumo service, get the info.
                 """
                 info = zc.get_service_info(type_, name)
-                if info.name.startswith('JumpingSumo-'):
-                    ip_list.append(socket.inet_ntoa(info.address))
+                connection_info.append(socket.inet_ntoa(info.address))
+                connection_info.append(info.port)
 
-        ssh_browser = zeroconf.ServiceBrowser(
-            self._zc, '_ssh._tcp.local.', SshListener()
+        browser = zeroconf.ServiceBrowser(
+            self._zc, service_type, Listener()
         )
-        while len(ip_list) == 0:
+        while len(connection_info) < 2:
             time.sleep(0.1)
-        ssh_browser.cancel()
+        browser.cancel()
 
-        ip = ip_list[0]
-
-        # Now we have the IP, we can connect via telnet and get the init port
-        # zeroconf type.
-        tconn = telnetlib.Telnet(ip, timeout=1)
-        tconn.read_until('[JS] $ ')
-        tconn.write('cat /etc/avahi/services/ardiscovery.service\r\n')
-        data = tconn.read_until('[JS] $ ').replace('\r\n', '')
-
-        service_type = re.search(r'>(_arsdk-\d+\._udp)<', data).groups()[0]
-        init_port = int(re.search(r'<port>(\d+)</port>', data).groups()[0])
-
-        return service_type + '.local.', ip, init_port
+        return connection_info
 
 
-    def announce_proxy_sumo(self, service_type, ip, init_port, service_name='JumpingSumo-SumoProxy'):
+    def announce_proxy_sumo(self, ip, init_port,
+                            service_name='JumpingSumo-SumoProxy',
+                            service_type='_arsdk-0902._udp.local.'):
         """ Announce the proxied Jumping Sumo.
         """
         info = zeroconf.ServiceInfo(
@@ -91,7 +76,6 @@ class SumoProxy(object):
             init_port,
             properties={},
         )
-
         self._zc.register_service(info)
 
 
@@ -194,13 +178,12 @@ class SumoProxy(object):
         """
         # Find the robot
         print 'Searching for Jumping Sumo...',
-        service_type, sumo_ip, init_port = self.get_first_sumo()
+        sumo_ip, init_port = self.get_first_sumo()
         print 'Done!'
 
         # Announce equivalent sumo
         print 'Announcing Sumo Proxy...',
         self.announce_proxy_sumo(
-            service_type,
             self._proxy_ip,
             init_port,
         )
