@@ -19,11 +19,15 @@ PROXY_IP = '192.168.20.3'
 class SumoProxy(object):
     """ Proxy for Jumping Sumo to display data.
     """
-    RECV_MAX = 10240
+    RECV_MAX = 102400
 
     def __init__(self, proxy_ip):
         self._proxy_ip = proxy_ip
         self._zc = zeroconf.Zeroconf()
+
+        # Monkey-patch the UDP socket server to recieve video packets.
+        SocketServer.UDPServer.max_packet_size = 65000
+
 
     def get_first_sumo(self):
         """ Return the zeroconf name for the first Jumping Sumo you can find.
@@ -149,7 +153,7 @@ class SumoProxy(object):
                         send_socket.sendto(data, (sumo_ip, c2d_port))
                     # From sumo to client
                     else:
-                        print '<', repr(data)
+                        print '<', repr(data[:50])
                         send_socket.sendto(data, (client_ip, c2d_port))
 
             server = SocketServer.UDPServer(('', c2d_port), Handler)
@@ -170,7 +174,7 @@ class SumoProxy(object):
                 """
                 def handle(self):
                     data = self.request[0]
-                    print '<', repr(data)
+                    print '<', repr(data[:50])
                     send_socket.sendto(data, (client_ip, d2c_port))
 
             c2d_server = SocketServer.UDPServer(('', c2d_port), C2DHandler)
