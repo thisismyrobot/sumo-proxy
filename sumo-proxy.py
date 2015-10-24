@@ -270,5 +270,6 @@ if __name__ == '__main__':
         proc = multiprocessing.Process(target=proc_wrapper)
         proc.start()
         proc.join()
+        proc.terminate()
         print 'Restarting...'
         time.sleep(1)
