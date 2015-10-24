@@ -1,6 +1,7 @@
 """ Proxy for parrot devices.
 """
 import json
+import netifaces
 import socket
 import time
 import threading
@@ -8,16 +9,23 @@ import zeroconf
 import SocketServer
 
 
-### CONFIGURATION
-#
-# The PROXY_IP is the IP of your interface that will share the "fake" Sumo.
-PROXY_IP = '192.168.20.3'
-
-
 def repr_bytes(bytes, maximum=25):
     """ Nicer data printing.
     """
     return ''.join('\\x{:02x}'.format(ord(c)) for c in bytes[:maximum])
+
+
+def ip_addresses():
+    """ Return all my IP addresses.
+    """
+    addresses = []
+    for interface in netifaces.interfaces():
+        try:
+            for link in netifaces.ifaddresses(interface)[netifaces.AF_INET]:
+                addresses.append(link['addr'])
+        except KeyError:
+            pass
+    return sorted(addresses)
 
 
 class SumoProxy(object):
@@ -61,21 +69,24 @@ class SumoProxy(object):
 
         return connection_info
 
-
-    def announce_proxy_sumo(self, ip, init_port,
-                            service_name='JumpingSumo-SumoProxy',
+    def announce_proxy_sumo(self, init_port,
+                            service_name='Sumo',
                             service_type='_arsdk-0902._udp.local.'):
-        """ Announce the proxied Jumping Sumo.
+        """ Announce the proxied Jumping Sumo on all interfaces.
         """
-        info = zeroconf.ServiceInfo(
-            service_type,
-            '.'.join((service_name, service_type)),
-            socket.inet_aton(ip),
-            init_port,
-            properties={},
-        )
-        self._zc.register_service(info)
-
+        for address in ip_addresses():
+            iface_service_name = '{}-{}'.format(
+                service_name,
+                address.replace('.', '-')
+            )
+            info = zeroconf.ServiceInfo(
+                service_type,
+                '.'.join((iface_service_name, service_type)),
+                socket.inet_aton(address),
+                init_port,
+                properties={},
+            )
+            self._zc.register_service(info)
 
     def proxy_init(self, sumo_ip, init_port):
         """ Proxy the init.
@@ -181,10 +192,7 @@ class SumoProxy(object):
 
         # Announce equivalent sumo
         print 'Announcing Sumo Proxy...',
-        self.announce_proxy_sumo(
-            self._proxy_ip,
-            init_port,
-        )
+        self.announce_proxy_sumo(init_port)
         print 'Done!'
 
         print 'Waiting for client initiation...',
