@@ -10,6 +10,13 @@ import zeroconf
 import SocketServer
 
 
+# UDP Port to listen to data from, and port to send data to
+REPEAT_PORT = 65432
+
+# Host that UDP data is sent to
+REPEAT_HOST = '127.0.0.1'
+
+
 def repr_bytes(bytes, maximum=25):
     """ Nicer data printing.
     """
@@ -171,8 +178,10 @@ class SumoProxy(object):
                         send_socket.sendto(data, (sumo_ip, c2d_port))
                     # From sumo to client
                     else:
-                        print '<', repr_bytes(data)
                         send_socket.sendto(data, (client_ip, c2d_port))
+
+                        # Tee-off the data to another host
+                        send_socket.sendto(data, (REPEAT_HOST, REPEAT_PORT))
 
             server = SocketServer.UDPServer(('', c2d_port), Handler)
             t = threading.Thread(target=server.serve_forever)
@@ -196,8 +205,10 @@ class SumoProxy(object):
                 def handle(self):
                     data_queue.append(True)
                     data = self.request[0]
-                    print '<', repr_bytes(data)
                     send_socket.sendto(data, (client_ip, d2c_port))
+
+                    # Tee-off the data to another host
+                    send_socket.sendto(data, (REPEAT_HOST, REPEAT_PORT))
 
             c2d_server = SocketServer.UDPServer(('', c2d_port), C2DHandler)
             d2c_server = SocketServer.UDPServer(('', d2c_port), D2CHandler)

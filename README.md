@@ -4,10 +4,13 @@
 
 Proxy server for Parrot Jumping Sumo.
 
-Prints out data (first 25 bytes by default) in both directions for connection.
+## Operation
 
-Designed for a two-interface PC - one interface connects to the Sumo and the
-other connects to an existing Access Point. The controller (e.g. iPad)
-connects to the Access Point and is able to see the Sumo via this proxy.
+First, connect your computer to the Jumping Sumo.
 
-Started life in the [sumo charge](https://github.com/thisismyrobot/sumo-charge) repository.
+Running sumo-proxy.py will find that Sumo and create a proxy version hosted on
+every network interface (including the one with the Sumo on it).
+
+You can use your normal controller to (e.g. iPad) to connect to the Sumo on
+any of these interfaces, while sumo-proxy repeats the sumo -> controller
+UDP data (e.g. Battery Voltages or Video) over UDP to another host.
