@@ -17,12 +17,6 @@ REPEAT_PORT = 65432
 REPEAT_HOST = '127.0.0.1'
 
 
-def repr_bytes(bytes, maximum=25):
-    """ Nicer data printing.
-    """
-    return ''.join('\\x{:02x}'.format(ord(c)) for c in bytes[:maximum])
-
-
 def ip_addresses():
     """ Return all my IP addresses.
     """
@@ -174,14 +168,17 @@ class SumoProxy(object):
 
                     # From client to sumo
                     if self.client_address[0] == client_ip:
-                        print '>', repr_bytes(data)
                         send_socket.sendto(data, (sumo_ip, c2d_port))
+
+                        # Tee-off the data to another host
+                        send_socket.sendto('>'+data, (REPEAT_HOST, REPEAT_PORT))
+
                     # From sumo to client
                     else:
                         send_socket.sendto(data, (client_ip, c2d_port))
 
                         # Tee-off the data to another host
-                        send_socket.sendto(data, (REPEAT_HOST, REPEAT_PORT))
+                        send_socket.sendto('<'+data, (REPEAT_HOST, REPEAT_PORT))
 
             server = SocketServer.UDPServer(('', c2d_port), Handler)
             t = threading.Thread(target=server.serve_forever)
@@ -196,8 +193,9 @@ class SumoProxy(object):
                 def handle(self):
                     data_queue.append(True)
                     data = self.request[0]
-                    print '>', repr_bytes(data)
                     send_socket.sendto(data, (sumo_ip, c2d_port))
+                    # Tee-off the data to another host
+                    send_socket.sendto('>'+data, (REPEAT_HOST, REPEAT_PORT))
 
             class D2CHandler(SocketServer.BaseRequestHandler):
                 """ Handle sumo to client comms.
@@ -208,7 +206,7 @@ class SumoProxy(object):
                     send_socket.sendto(data, (client_ip, d2c_port))
 
                     # Tee-off the data to another host
-                    send_socket.sendto(data, (REPEAT_HOST, REPEAT_PORT))
+                    send_socket.sendto('<'+data, (REPEAT_HOST, REPEAT_PORT))
 
             c2d_server = SocketServer.UDPServer(('', c2d_port), C2DHandler)
             d2c_server = SocketServer.UDPServer(('', d2c_port), D2CHandler)

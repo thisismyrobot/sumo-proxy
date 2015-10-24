@@ -12,5 +12,6 @@ Running sumo-proxy.py will find that Sumo and create a proxy version hosted on
 every network interface (including the one with the Sumo on it).
 
 You can use your normal controller to (e.g. iPad) to connect to the Sumo on
-any of these interfaces, while sumo-proxy repeats the sumo -> controller
-UDP data (e.g. Battery Voltages or Video) over UDP to another host.
+any of these interfaces, while sumo-proxy repeats the UDP data (e.g. Battery
+Voltages or Video) over UDP to another host (use sumo-proxy-printer.py to
+view).
