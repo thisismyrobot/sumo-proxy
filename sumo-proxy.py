@@ -1,5 +1,6 @@
 """ Proxy for parrot devices.
 """
+import collections
 import json
 import netifaces
 import socket
@@ -33,18 +34,17 @@ class SumoProxy(object):
     """
     RECV_MAX = 102400
 
-    def __init__(self, proxy_ip):
-        self._proxy_ip = proxy_ip
+    def __init__(self):
         self._zc = zeroconf.Zeroconf()
 
         # Monkey-patch the UDP socket server to recieve video packets.
         SocketServer.UDPServer.max_packet_size = 65000
 
-
     def get_first_sumo(self, service_type='_arsdk-0902._udp.local.'):
         """ Return the IP and INIT port for the first Jumping Sumo you find.
         """
         connection_info = []
+
         class Listener(object):
             """ A simple listener for the sumo init service.
             """
@@ -57,17 +57,27 @@ class SumoProxy(object):
                 """ If we've found the JumpingSumo service, get the info.
                 """
                 info = zc.get_service_info(type_, name)
-                connection_info.append(socket.inet_ntoa(info.address))
-                connection_info.append(info.port)
+                connection_info.extend(
+                    (socket.inet_ntoa(info.address), info.port)
+                )
 
         browser = zeroconf.ServiceBrowser(
             self._zc, service_type, Listener()
         )
+
+        wait_time = 30  # Seconds
+        started = time.time()
         while len(connection_info) < 2:
+            if not browser.is_alive():
+                raise Exception('Zeroconf Browser crashed')
+            if time.time() - started > wait_time:
+                raise Exception(
+                    'No Sumo found within {} seconds'.format(wait_time)
+                )
             time.sleep(0.1)
         browser.cancel()
 
-        return connection_info
+        return connection_info[:2]
 
     def announce_proxy_sumo(self, init_port,
                             service_name='Sumo',
@@ -127,14 +137,22 @@ class SumoProxy(object):
         init_server = SocketServer.TCPServer(('', init_port), InitHandler)
         server_thread = threading.Thread(target=init_server.serve_forever)
         server_thread.start()
-        server_thread.join()
+
+        wait_time = 30
+        server_thread.join(wait_time)
+
+        # If thread's still alive we didn't have an init
+        if server_thread.is_alive():
+            raise Exception(
+                'No init within {} seconds of announce'.format(wait_time)
+            )
 
         return return_data
-
 
     def proxy_session(self, client_ip, sumo_ip, c2d_port, d2c_port):
         """ Proxy a UDP session between client and sumo.
         """
+        data_queue = collections.deque([True], maxlen=1)
         send_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
         # If the c2d and d2c ports are the same, we start a single server.
@@ -144,6 +162,7 @@ class SumoProxy(object):
                 """ Handle all comms.
                 """
                 def handle(self):
+                    data_queue.append(True)
                     data = self.request[0]
 
                     # From client to sumo
@@ -156,7 +175,9 @@ class SumoProxy(object):
                         send_socket.sendto(data, (client_ip, c2d_port))
 
             server = SocketServer.UDPServer(('', c2d_port), Handler)
-            threading.Thread(target=server.serve_forever).start()
+            t = threading.Thread(target=server.serve_forever)
+            t.daemon = True
+            t.start()
 
         else:
 
@@ -164,6 +185,7 @@ class SumoProxy(object):
                 """ Handle client to sumo comms.
                 """
                 def handle(self):
+                    data_queue.append(True)
                     data = self.request[0]
                     print '>', repr_bytes(data)
                     send_socket.sendto(data, (sumo_ip, c2d_port))
@@ -172,15 +194,29 @@ class SumoProxy(object):
                 """ Handle sumo to client comms.
                 """
                 def handle(self):
+                    data_queue.append(True)
                     data = self.request[0]
                     print '<', repr_bytes(data)
                     send_socket.sendto(data, (client_ip, d2c_port))
 
             c2d_server = SocketServer.UDPServer(('', c2d_port), C2DHandler)
             d2c_server = SocketServer.UDPServer(('', d2c_port), D2CHandler)
-            threading.Thread(target=c2d_server.serve_forever).start()
-            threading.Thread(target=d2c_server.serve_forever).start()
+            t1 = threading.Thread(target=c2d_server.serve_forever)
+            t1.daemon = True
+            t1.start()
+            t2 = threading.Thread(target=d2c_server.serve_forever)
+            t2.daemon = True
+            t2.start()
 
+        comms_time = 1
+        while True:
+            try:
+                data_queue.pop()
+            except IndexError:
+                raise Exception(
+                    'No comms for more than {} seconds'.format(comms_time)
+                )
+            time.sleep(comms_time)
 
     def start(self):
         """ Handle all the things.
@@ -199,20 +235,31 @@ class SumoProxy(object):
         client_ip, c2d_port, d2c_port = self.proxy_init(sumo_ip, init_port)
         print 'Done!'
 
+        if c2d_port == 0:
+            raise Exception('Another client already connected!')
+
         print 'Serving session...',
         self.proxy_session(client_ip, sumo_ip, c2d_port, d2c_port)
         print 'Done!'
 
-        if c2d_port == 0:
-            print 'Another client already connected!'
-            return
-        else:
-            print 'Press Ctrl-C to quit...'
-            while True:
-                time.sleep(0.1)
+
+def proc_wrapper():
+    """ Run the proxy.
+    """
+    try:
+        proxy = SumoProxy()
+        proxy.start()
+    except Exception as ex:
+        print 'Ex: {}'.format(ex)
 
 
 if __name__ == '__main__':
 
-    proxy = SumoProxy(PROXY_IP)
-    proxy.start()
+    import multiprocessing
+    print 'Starting...'
+    while True:
+        proc = multiprocessing.Process(target=proc_wrapper)
+        proc.start()
+        proc.join()
+        print 'Restarting...'
+        time.sleep(1)
