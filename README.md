@@ -8,7 +8,7 @@ Proxy server for Parrot Jumping Sumo.
 
 First, connect your computer to the Jumping Sumo.
 
-Running sumo-proxy.py will find that Sumo and create a proxy version hosted on
+Running proxy.py will find that Sumo and create a proxy version hosted on
 every network interface (including the one with the Sumo on it).
 
 You can use your normal controller to (e.g. iPad) to connect to the Sumo on
