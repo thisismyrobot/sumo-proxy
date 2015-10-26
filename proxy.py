@@ -1,4 +1,7 @@
-""" Proxy for parrot devices.
+""" Proxy for Parrot devices.
+
+    Finds the first Jumping Sumo it can, re-advertises a proxied version on
+    all interfaces.
 """
 import collections
 import json
@@ -8,13 +11,6 @@ import time
 import threading
 import zeroconf
 import SocketServer
-
-
-# UDP Port to listen to data from, and port to send data to
-REPEAT_PORT = 65432
-
-# Host that UDP data is sent to
-REPEAT_HOST = '127.0.0.1'
 
 
 def ip_addresses():
@@ -35,7 +31,12 @@ class SumoProxy(object):
     """
     RECV_MAX = 102400
 
-    def __init__(self):
+    def __init__(self, repeaters=None):
+        """ 'repeaters' argument is list of (ip, port) tuples.
+
+            Each is sent a copy of the data in each direction.
+        """
+        self._repeaters = [] if repeaters is None else repeaters
         self._zc = zeroconf.Zeroconf()
 
         # Monkey-patch the UDP socket server to recieve video packets.
@@ -110,23 +111,63 @@ class SumoProxy(object):
             """
             def handle(self):
 
+                # Capture the client's IP address.
                 client_ip = self.client_address[0]
 
-                # Get and pass on the init request, capturing the d2c_port
+                # Get the init request, strip the trailing '\x00', convert to
+                # JSON
                 data = self.request.recv(SumoProxy.RECV_MAX)
-                d2c_port = json.loads(data[:-1])['d2c_port']
+                json_data = json.loads(data[:-1])
+
+                # Grab the d2c port that the client is listening on - this is
+                # where it expects to recieve packets. Will probably be 54321.
+                client_d2c_port = json_data['d2c_port']
+
+                # Create a new d2c port that the proxy will listen on - this
+                # is how we intercept the packets. Will probably be 54322.
+                prox_d2c_port = client_d2c_port + 1
+
+                # Modify the init to tell the Sumo to send packets to the
+                # proxy's d2c port. We'll pass these on to the client's d2c
+                # port.
+                json_data['d2c_port'] = prox_d2c_port
+                data = json.dumps(json_data) + '\x00'
+
+                # Send on the init.
                 sumo_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sumo_sock.connect((sumo_ip, init_port))
                 sumo_sock.sendall(data)
 
-                # Get and pass on the init response, capturing the c2d_port
+                # Get the init response, strip the trailing '\x00', convert to
+                # JSON
                 data = sumo_sock.recv(SumoProxy.RECV_MAX)
+                json_data = json.loads(data[:-1])
                 sumo_sock.close()
 
-                c2d_port = json.loads(data[:-1])['c2d_port']
+                # Grab the c2d port that the sumo is listening on - we'll send
+                # packets to this later. Will probably be 54321.
+                sumo_c2d_port = json_data['c2d_port']
+
+                # Create a new c2d port for the proxy - this is where the
+                # client will send packets to and we'll pass them on to the
+                # Sumo's c2d port. Will probably be 54320.
+                prox_c2d_port = sumo_c2d_port - 1
+
+                # Modify the init response to tell the client to send packets
+                # to the proxy's c2d port, where the proxy can pass them on to
+                # the Sumo's c2d port.
+                json_data['c2d_port'] = prox_c2d_port
+                data = json.dumps(json_data) + '\x00'
+
+                # Return the modified init response back to the client.
                 self.request.sendall(data)
 
-                return_data.extend((client_ip, c2d_port, d2c_port))
+                return_data.extend((
+                    client_ip, (
+                        sumo_c2d_port, client_d2c_port,
+                        prox_c2d_port, prox_d2c_port,
+                    )
+                ))
 
                 def tidy():
                     """ Clean up the server.
@@ -150,72 +191,49 @@ class SumoProxy(object):
 
         return return_data
 
-    def proxy_session(self, client_ip, sumo_ip, c2d_port, d2c_port):
+    def proxy_session(self, client_ip, sumo_ip, sumo_c2d_port,
+                      client_d2c_port, prox_c2d_port, prox_d2c_port):
         """ Proxy a UDP session between client and sumo.
         """
+
         data_queue = collections.deque([True], maxlen=1)
         send_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-        # If the c2d and d2c ports are the same, we start a single server.
-        if c2d_port == d2c_port:
+        repeaters = self._repeaters
 
-            class Handler(SocketServer.BaseRequestHandler):
-                """ Handle all comms.
-                """
-                def handle(self):
-                    data_queue.append(True)
-                    data = self.request[0]
+        class C2DHandler(SocketServer.BaseRequestHandler):
+            """ Handle client to sumo comms.
+            """
+            def handle(self):
+                data_queue.append(True)
+                data = self.request[0]
+                send_socket.sendto(data, (sumo_ip, sumo_c2d_port))
 
-                    # From client to sumo
-                    if self.client_address[0] == client_ip:
-                        send_socket.sendto(data, (sumo_ip, c2d_port))
+                # Tee-off the data to another hosts
+                for target in repeaters:
+                    send_socket.sendto('>'+data, target)
 
-                        # Tee-off the data to another host
-                        send_socket.sendto('>'+data, (REPEAT_HOST, REPEAT_PORT))
 
-                    # From sumo to client
-                    else:
-                        send_socket.sendto(data, (client_ip, c2d_port))
+        class D2CHandler(SocketServer.BaseRequestHandler):
+            """ Handle sumo to client comms.
+            """
+            def handle(self):
+                data_queue.append(True)
+                data = self.request[0]
+                send_socket.sendto(data, (client_ip, client_d2c_port))
 
-                        # Tee-off the data to another host
-                        send_socket.sendto('<'+data, (REPEAT_HOST, REPEAT_PORT))
+                # Tee-off the data to another hosts
+                for target in repeaters:
+                    send_socket.sendto('<'+data, target)
 
-            server = SocketServer.UDPServer(('', c2d_port), Handler)
-            t = threading.Thread(target=server.serve_forever)
-            t.daemon = True
-            t.start()
-
-        else:
-
-            class C2DHandler(SocketServer.BaseRequestHandler):
-                """ Handle client to sumo comms.
-                """
-                def handle(self):
-                    data_queue.append(True)
-                    data = self.request[0]
-                    send_socket.sendto(data, (sumo_ip, c2d_port))
-                    # Tee-off the data to another host
-                    send_socket.sendto('>'+data, (REPEAT_HOST, REPEAT_PORT))
-
-            class D2CHandler(SocketServer.BaseRequestHandler):
-                """ Handle sumo to client comms.
-                """
-                def handle(self):
-                    data_queue.append(True)
-                    data = self.request[0]
-                    send_socket.sendto(data, (client_ip, d2c_port))
-
-                    # Tee-off the data to another host
-                    send_socket.sendto('<'+data, (REPEAT_HOST, REPEAT_PORT))
-
-            c2d_server = SocketServer.UDPServer(('', c2d_port), C2DHandler)
-            d2c_server = SocketServer.UDPServer(('', d2c_port), D2CHandler)
-            t1 = threading.Thread(target=c2d_server.serve_forever)
-            t1.daemon = True
-            t1.start()
-            t2 = threading.Thread(target=d2c_server.serve_forever)
-            t2.daemon = True
-            t2.start()
+        c2d_server = SocketServer.UDPServer(('', prox_c2d_port), C2DHandler)
+        d2c_server = SocketServer.UDPServer(('', prox_d2c_port), D2CHandler)
+        t1 = threading.Thread(target=c2d_server.serve_forever)
+        t1.daemon = True
+        t1.start()
+        t2 = threading.Thread(target=d2c_server.serve_forever)
+        t2.daemon = True
+        t2.start()
 
         comms_time = 1
         while True:
@@ -233,7 +251,7 @@ class SumoProxy(object):
         # Find the robot
         print 'Searching for Jumping Sumo...',
         sumo_ip, init_port = self.get_first_sumo()
-        print 'Done!'
+        print 'Done (found {})!'.format(sumo_ip)
 
         # Announce equivalent sumo
         print 'Announcing Sumo Proxy...',
@@ -241,22 +259,27 @@ class SumoProxy(object):
         print 'Done!'
 
         print 'Waiting for client initiation...',
-        client_ip, c2d_port, d2c_port = self.proxy_init(sumo_ip, init_port)
+        client_ip, ports = self.proxy_init(sumo_ip, init_port)
         print 'Done!'
 
-        if c2d_port == 0:
-            raise Exception('Another client already connected!')
+        # If sumo_c2d_port (ports[0]) is zero, Sumo is currently in a session.
+        if ports[0] == 0:
+            raise Exception(
+                'Sumo responded that another client is already connected!'
+            )
 
         print 'Serving session...',
-        self.proxy_session(client_ip, sumo_ip, c2d_port, d2c_port)
+        self.proxy_session(client_ip, sumo_ip, *ports)
         print 'Done!'
 
 
-def proc_wrapper():
+def proc_wrapper(repeaters=None):
     """ Run the proxy.
     """
+    if repeaters is None:
+        repeaters = []
     try:
-        proxy = SumoProxy()
+        proxy = SumoProxy(repeaters)
         proxy.start()
     except Exception as ex:
         print 'Ex: {}'.format(ex)
