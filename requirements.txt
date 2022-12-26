@@ -2,5 +2,5 @@ enum-compat==0.0.2
 enum34==1.0.4
 netifaces==0.10.4
 six==1.10.0
-wheel==0.24.0
+wheel==0.38.1
 zeroconf==0.17.4
